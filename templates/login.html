@@ -1,0 +1,27 @@
+<!DOCTYPE html>
+<html>
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>登录</title>
+    <link rel="stylesheet" href="{{ url_for('static', filename='css/style.css') }}">
+<body>
+ 
+    <div class="card">
+        <h1>Hello, 欢迎来到英语听说练习平台</h1>
+        <p>请登录</p>
+        <form action="/signin" method="post">
+            <label for="name">用户名:</label>
+            <input type="text" placeholder="用户名"id="name" name="name" required><br><br>
+            <label for="password">密码:</label>
+            <input type="password" placeholder="密码" id="password" name="password" required><br><br>
+            <label for="remember">
+                <input type="checkbox" id="remember" name="remember">
+                记住我
+            </label>
+            <button type="submit">登录</button>
+        </form>
+    </div>
+ 
+</body>
+</html>
