@@ -68,7 +68,8 @@
       const sess = await PracticeStore.createSession("vowel", params);
       sessionId = sess.sessionId;
 
-      const data = await Common.api("/api/vowel/questions", params);
+      // 带上 session_id：服务器模式下后端把这批题和标准答案记到会话上，交卷时据此判分
+      const data = await Common.api("/api/vowel/questions", { ...params, session_id: sessionId });
       questions = data.questions;
       mode = data.mode || params.mode;
       timeLimit = params.time_limit;

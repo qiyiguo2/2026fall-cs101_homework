@@ -170,12 +170,20 @@ class TestServerMode(ModeTestBase):
                                    json={"practice_type": "vowel", "params": {"count": 2}})
         self.assertEqual(created.status_code, 200)
         session_id = created.get_json()["session_id"]
+        with app_module.app.app_context():
+            from services import practice
+            group = practice.list_vowel_groups()[0]["group_key"]
+        issued = self.client.post("/api/vowel/questions", json={
+            "group_key": group, "count": 2, "session_id": session_id})
+        self.assertEqual(issued.status_code, 200, issued.get_json())
+        first, second = issued.get_json()["questions"]
 
+        # 第一题选对、第二题选错；成绩以后端按出题快照判的为准
         records = [
-            {"seq": 1, "type": "vowel", "question": {"type": "vowel", "answer": 1, "options": []},
-             "user_answer": 1, "is_correct": True},
-            {"seq": 2, "type": "vowel", "question": {"type": "vowel", "answer": 2, "options": []},
-             "user_answer": 1, "is_correct": False},
+            {"seq": 1, "type": "vowel", "question": {"type": "vowel"},
+             "user_answer": first["answer"], "is_correct": True},
+            {"seq": 2, "type": "vowel", "question": {"type": "vowel"},
+             "user_answer": 3 - second["answer"], "is_correct": False},
         ]
         done = self.client.post("/api/practice/finish",
                                 json={"session_id": session_id, "records": records})
@@ -224,7 +232,12 @@ class TestLocalMode(ModeTestBase):
         self.assertEqual(len(data["questions"]), 3)
         self.assertTrue(data["questions"][0]["audio_url"].startswith("/static/"))
 
-        words = self.client.post("/api/words", json={"count": 4})
+        # 本地模式的 session_id 是浏览器 IndexedDB 的键，后端忽略它，不登记也不报错
+        with_sid = self.client.post("/api/vowel/questions",
+                                    json={"group_key": group, "count": 2, "session_id": 1})
+        self.assertEqual(with_sid.status_code, 200, with_sid.get_data())
+
+        words = self.client.post("/api/words", json={"count": 4, "session_id": 1})
         self.assertEqual(words.status_code, 200)
         self.assertEqual(len(words.get_json()["words"]), 4)
         self.assertEqual(self.client.get("/api/words/all").status_code, 200)

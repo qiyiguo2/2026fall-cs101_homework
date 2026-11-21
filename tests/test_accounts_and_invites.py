@@ -238,6 +238,10 @@ class TestRecordings(FreshDbTestCase):
         alice_path = self.upload(alice).get_json()["path"]
         sid = bob.post("/api/practice/session",
                        json={"practice_type": "read-translate", "params": {}}).get_json()["session_id"]
+        with sqlite3.connect(self.db_path) as conn:
+            conn.execute("INSERT INTO words(word, meaning_cn) VALUES('abandon', '放弃')")
+        issued = bob.post("/api/words", json={"count": 1, "session_id": sid})
+        self.assertEqual(issued.status_code, 200, issued.get_json())
         res = bob.post("/api/practice/finish", json={"session_id": sid, "records": [
             {"seq": 1, "question": {}, "user_answer": "x", "is_correct": False,
              "recording_path": alice_path}]})

@@ -19,7 +19,7 @@ from flask import (
     session,
     url_for,
 )
-from services import auth, practice, registration
+from services import auth, grading, practice, registration
 
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 
@@ -695,6 +695,10 @@ def api_vowel_questions():
     for q in questions:
         q["audio_url"] = audio_url(q["audio"])
         q.pop("audio", None)
+    refused = register_questions(
+        data, ("vowel",), [grading.snapshot_vowel(q, mode) for q in questions])
+    if refused:
+        return refused
     return jsonify({
         "questions": questions,
         "mode": mode,
@@ -724,6 +728,12 @@ def api_words():
     for w in words:
         # practice.random_words 已经按题随机挑好性别，这里只把相对路径换成 URL
         w["audio_url"] = audio_url(w.pop("audio"))
+    session_type = registered_type(data)
+    refused = register_questions(
+        data, ("read-translate", "listen-spell"),
+        [grading.snapshot_word(i, w, session_type) for i, w in enumerate(words, start=1)])
+    if refused:
+        return refused
     # actual < requested 说明词库不够，前端要提示用户实际只练了 actual 题
     return jsonify({
         "words": words,
@@ -768,10 +778,69 @@ def already_finished(session_id):
     }), 409
 
 
+# ---------------------------------------------------------------- 出题登记
+# 服务器模式下成绩由后端判（services/grading.py）：出题接口带 session_id 时，
+# 把这场发出去的题连同标准答案记进 practice_sessions.questions_json，交卷时按它重算。
+# 本地模式不写库，session_id 是浏览器 IndexedDB 的键，这里直接忽略。
+
+def _owned_open_session(session_id):
+    """当前用户名下、还没交卷的会话；找不到返回 None。"""
+    try:
+        sid = int(session_id)
+    except (TypeError, ValueError):
+        return None
+    return get_db().execute(
+        "SELECT id, practice_type, finished, questions_json FROM practice_sessions "
+        "WHERE id = ? AND user_id = ?",
+        (sid, current_user()["id"]),
+    ).fetchone()
+
+
+def registered_type(data):
+    """/api/words 两种练习共用：快照里的题型取会话自己的类型，不信前端。"""
+    if is_local() or data.get("session_id") is None:
+        return None
+    row = _owned_open_session(data.get("session_id"))
+    return row["practice_type"] if row else None
+
+
+def register_questions(data, allowed_types, snapshots):
+    """把发出去的题记到会话上。成功（或无需登记）返回 None，否则返回错误响应。
+
+    不带 session_id 的请求照常出题、不登记：这样的会话交卷时会被拒绝（见 api_finish_session），
+    所以不登记不会变成绕过判分的口子。一场练习只登记一次，第二次出题回 409 ——
+    前端每点一次「开始练习」都会新建会话，正常流程不会撞上。
+    """
+    if is_local() or data.get("session_id") is None:
+        return None
+    row = _owned_open_session(data.get("session_id"))
+    if not row:
+        return jsonify({"error": "练习会话不存在"}), 404
+    if row["practice_type"] not in allowed_types:
+        return jsonify({"error": "这场练习的类型和所出的题对不上"}), 400
+    if row["finished"]:
+        return already_finished(row["id"])
+    db = get_db()
+    claimed = db.execute(
+        "UPDATE practice_sessions SET questions_json = ? "
+        "WHERE id = ? AND questions_json IS NULL AND finished = 0",
+        (json.dumps(snapshots, ensure_ascii=False), row["id"]),
+    ).rowcount
+    db.commit()
+    if not claimed:
+        return jsonify({"error": "这场练习已经出过题了，请重新开始一场"}), 409
+    return None
+
+
 @app.post("/api/practice/finish")
 @api_login_required
 def api_finish_session():
-    """练习结束时一次性提交全部作答记录，题目信息和音频路径都存进 question_json 供回看。"""
+    """练习结束时一次性提交全部作答记录。
+
+    前端只被采信「第几题、答了什么、录音是哪个文件」：题目内容和标准答案取出题时
+    登记的快照，对错由 services/grading.py 重算，前端传来的 is_correct 和 question 一律不用。
+    没交上来的题按无回答算错，总题数等于发出去的题数——只交答对的那几题拿不到满分。
+    """
     if is_local():
         return local_mode_refuse("practice_finish")
     data = json_body()
@@ -786,16 +855,21 @@ def api_finish_session():
 
     db = get_db()
     row = db.execute(
-        "SELECT id, finished FROM practice_sessions WHERE id = ? AND user_id = ?",
+        "SELECT id, finished, questions_json FROM practice_sessions WHERE id = ? AND user_id = ?",
         (session_id, uid),
     ).fetchone()
     if not row:
         return jsonify({"error": "练习会话不存在"}), 404
     if row["finished"]:
         return already_finished(session_id)
+    if row["questions_json"] is None:
+        # 多半是浏览器还缓存着改版前的脚本：出题时没带 session_id，服务器不知道发过哪些题
+        return jsonify({"error": "服务器上没有这场练习的出题记录，无法判分。"
+                                 "请刷新页面（必要时强制刷新）后重新开始一场。"}), 409
+    issued = {q["seq"]: q for q in json.loads(row["questions_json"])}
 
     # 先把所有记录校验完再动数据库：边校验边写会让一条脏数据把已有成绩删掉后 500
-    parsed = []
+    answers = {}
     for index, rec in enumerate(records, start=1):
         if not isinstance(rec, dict):
             return jsonify({"error": f"第 {index} 条记录格式不正确"}), 400
@@ -803,28 +877,28 @@ def api_finish_session():
             seq = int(rec.get("seq", index))
         except (TypeError, ValueError):
             return jsonify({"error": f"第 {index} 条记录的题号不是数字"}), 400
-
-        # question 缺省或 null 容忍（老客户端可能不带），但带了就必须是对象，
-        # 否则结果页会渲染出一张空白题卡，把前端的 bug 藏成"没记录"
-        payload = rec.get("question", MISSING)
-        if payload is None:
-            payload = {}
-        if payload is not MISSING and not isinstance(payload, dict):
-            return jsonify({"error": f"第 {index} 条记录的 question 必须是对象"}), 400
-        if payload is MISSING:
-            payload = {}
-        payload.setdefault("type", rec.get("type"))
+        if seq not in issued:
+            return jsonify({"error": f"第 {index} 条记录的题号 {seq} 不在这场练习里"}), 400
+        if seq in answers:
+            return jsonify({"error": f"第 {seq} 题提交了不止一次"}), 400
 
         answer = rec.get("user_answer")
         # 只收标量：dict/list 直接 str() 会存成 "{'a': 1}" 这样的脏答案显示在结果页上
         if answer is not None and not isinstance(answer, (str, int, float, bool)):
             return jsonify({"error": f"第 {index} 条记录的 user_answer 必须是文本或数字"}), 400
+        answers[seq] = (answer, own_recording_path(rec.get("recording_path"), uid))
+
+    parsed = []
+    for seq in sorted(issued):
+        question = issued[seq]
+        answer, recording = answers.get(seq, (None, None))
+        payload = {k: v for k, v in question.items() if k != "seq"}
         parsed.append((
             seq,
             json.dumps(payload, ensure_ascii=False),
             None if answer is None else str(answer)[:200],
-            1 if rec.get("is_correct") else 0,
-            own_recording_path(rec.get("recording_path"), uid),
+            1 if grading.judge(question, answer) else 0,
+            recording,
         ))
 
     # 交卷只能交一次：以前对已交卷的会话再提交一遍，会把整场成绩删掉重写，

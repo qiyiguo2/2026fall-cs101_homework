@@ -117,6 +117,7 @@ CREATE TABLE IF NOT EXISTS practice_sessions (
     correct_count INTEGER NOT NULL DEFAULT 0,
     wrong_count   INTEGER NOT NULL DEFAULT 0,
     finished      INTEGER NOT NULL DEFAULT 0,
+    questions_json TEXT,                -- 出题时登记的题目与标准答案，交卷时据此在后端判分
     created_at    TIMESTAMP DEFAULT (datetime('now','localtime'))
 );
 
@@ -808,6 +809,18 @@ def migrate_users_rhythm_columns(conn):
             print("已为 users 表补上 %s 列" % name)
 
 
+def migrate_sessions_questions_column(conn):
+    """给老库的 practice_sessions 补上 questions_json（后端判分用的出题快照）。
+
+    没有这一列时，出题和交卷接口都会报 no such column。补列后老会话这一列是 NULL，
+    它们早已交卷，不受影响；还没交卷的老会话交卷时会被要求刷新页面重新开始。
+    """
+    columns = {row[1] for row in conn.execute("PRAGMA table_info(practice_sessions)")}
+    if "questions_json" not in columns:
+        conn.execute("ALTER TABLE practice_sessions ADD COLUMN questions_json TEXT")
+        print("已为 practice_sessions 表补上 questions_json 列")
+
+
 def backup_before_reset(conn):
     """--reset 之前把库和录音目录都留一份，返回 (库备份路径, 录音挪到的路径)，没有的项为 None。
 
@@ -872,6 +885,8 @@ def init_db(reset=False):
     migrate_words_voice_columns(conn)
     # users 表那四个「练习默认参数」列同理：老库只有 CREATE TABLE IF NOT EXISTS 挡着，不会补
     migrate_users_rhythm_columns(conn)
+    # 后端判分要的出题快照列，同样只能靠 ALTER 给老库补上
+    migrate_sessions_questions_column(conn)
 
     words = seed_words(conn)
     scan_vowel_audio(conn)

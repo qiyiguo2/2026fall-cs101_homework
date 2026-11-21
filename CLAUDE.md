@@ -19,7 +19,7 @@ REGISTER_MODE=open python app.py          # 本地开发绕过邀请码；或 py
 APP_MODE=local python app.py              # 免登录模式，成绩与录音只存浏览器
 ```
 
-测试用标准库 unittest，目前只有 `tests/test_app_modes.py`：
+测试用标准库 unittest，全部在 `tests/` 下：
 
 ```bash
 python -m unittest discover -s tests -v                                        # 全部
@@ -62,6 +62,11 @@ python -m unittest tests.test_app_modes.TestLocalMode.test_pages_open_without_an
 `services/practice.py` 负责抽题，包括近似音对立对随机、选项乱序、每题随机男声/女声。
 
 **练习流程。** 练习页先建会话，逐题作答与录音，结束时统一提交 `/api/practice/finish`，跳转结果页回看。
+服务器模式的成绩由后端判：出题接口（`/api/vowel/questions`、`/api/words`）带上 `session_id`，
+把发出的题和标准答案快照进 `practice_sessions.questions_json`；交卷时只采信「题号、作答、录音」，
+对错由 `services/grading.py` 重算，没交的题算错，没登记过题的会话拒绝交卷（409）。
+前端那份判分只管即时反馈和本地模式的成绩，看读译的中文规则在 `tworounds.js` 的 `judgeChinese`
+与 `grading.judge_chinese` 里各有一份，**必须一起改**，`tests/test_server_grading.py` 会用 node 对照两边。
 看读译 / 听读写的三个时长（第一轮、第二轮、题间停顿）边界在 `config.py` 的 `ROUND1_SECONDS` 等常量里，
 用户默认值存在 `users` 表对应列，`local` 模式存在 localStorage 的 `ep_settings`。
 

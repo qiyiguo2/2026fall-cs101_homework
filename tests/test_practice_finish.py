@@ -14,22 +14,33 @@ import unittest
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
-from test_app_modes import ModeTestBase, table_count  # noqa: E402  复用「库副本 + 造用户」
+from test_app_modes import ModeTestBase, app_module, table_count  # noqa: E402  复用「库副本 + 造用户」
 
 
 class TestFinishOnlyOnce(ModeTestBase):
 
-    def start_session(self):
+    def start_session(self, count=3):
+        """建会话并按后端判分的流程出 count 道近似音题，返回会话 id。"""
         self.as_server()
         self.sign_in()
         res = self.client.post("/api/practice/session",
                                json={"practice_type": "vowel", "params": {}})
         self.assertEqual(res.status_code, 200, res.get_json())
-        return res.get_json()["session_id"]
+        sid = res.get_json()["session_id"]
+        with app_module.app.app_context():
+            from services import practice
+            group = practice.list_vowel_groups()[0]["group_key"]
+        res = self.client.post("/api/vowel/questions",
+                               json={"group_key": group, "count": count, "session_id": sid})
+        self.assertEqual(res.status_code, 200, res.get_json())
+        self.questions = res.get_json()["questions"]
+        return sid
 
     def finish(self, sid, results):
-        records = [{"seq": i, "question": {"word": f"w{i}"}, "user_answer": "1",
-                    "is_correct": ok} for i, ok in enumerate(results, start=1)]
+        """results[i] 为 True 时第 i+1 题选标准答案，否则选另一个；只交 results 那么多题。"""
+        records = [{"seq": q["seq"], "question": {"word": "前端写的不算"},
+                    "user_answer": q["answer"] if ok else 3 - q["answer"],
+                    "is_correct": ok} for q, ok in zip(self.questions, results)]
         return self.client.post("/api/practice/finish",
                                 json={"session_id": sid, "records": records})
 

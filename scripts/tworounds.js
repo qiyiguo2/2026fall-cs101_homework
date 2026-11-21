@@ -123,7 +123,8 @@
       const sess = await PracticeStore.createSession(practiceType, params);
       sessionId = sess.sessionId;
 
-      const data = await Common.api("/api/words", { count });
+      // 带上 session_id：服务器模式下后端把这批词记到会话上，交卷时据此判分
+      const data = await Common.api("/api/words", { count, session_id: sessionId });
       words = data.words;
       if (!words.length) throw new Error("词库里没有单词，请先运行 scripts/init_db.py");
       if (data.actual < data.requested) {
@@ -391,6 +392,8 @@
     await finish();
   }
 
+  // 这里的判分只管作答当下的「✓ 正确」和计分板，以及本地模式的成绩。
+  // 服务器模式的成绩由后端按同一套规则重算（services/grading.py），改规则时两边一起改。
   // 释义有两种写法：教材种子词是「放弃；抛弃」，Quiz3000 那批来自 ECDICT，
   // 带词性前缀和领域标签，如「n. 扫除, 打扫；vt. 掸去」「[计] 黑客」「给…穿衣」。
   // 以前只按标点切、不去前缀，又用双向 includes，结果「n.」「.」「的」都能命中
