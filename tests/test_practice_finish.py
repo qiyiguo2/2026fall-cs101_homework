@@ -14,7 +14,7 @@ import unittest
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
-from test_app_modes import ModeTestBase, app_module, table_count  # noqa: E402  复用「库副本 + 造用户」
+from test_app_modes import ModeTestBase, app_module, issued_answers, table_count  # noqa: E402  复用「库副本 + 造用户」
 
 
 class TestFinishOnlyOnce(ModeTestBase):
@@ -34,6 +34,9 @@ class TestFinishOnlyOnce(ModeTestBase):
                                json={"group_key": group, "count": count, "session_id": sid})
         self.assertEqual(res.status_code, 200, res.get_json())
         self.questions = res.get_json()["questions"]
+        answers = issued_answers(self.db_path, sid)
+        for q in self.questions:
+            q["answer"] = answers[q["seq"]]
         return sid
 
     def finish(self, sid, results):

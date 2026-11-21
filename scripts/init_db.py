@@ -121,6 +121,17 @@ CREATE TABLE IF NOT EXISTS practice_sessions (
     created_at    TIMESTAMP DEFAULT (datetime('now','localtime'))
 );
 
+-- 近似音逐题判分时锁定的作答：一题只认第一次提交的选项。
+-- 服务器模式下出题接口不下发标准答案，学生作答时才经 /api/vowel/answer 换回对错和答案，
+-- 所以必须在这一刻把作答定死，否则可以先拿 1 号试出答案、交卷时再改成对的那个。
+CREATE TABLE IF NOT EXISTS practice_answers (
+    session_id  INTEGER NOT NULL REFERENCES practice_sessions(id) ON DELETE CASCADE,
+    seq         INTEGER NOT NULL,
+    user_answer TEXT,                   -- 选项编号；超时为 NULL
+    created_at  TIMESTAMP DEFAULT (datetime('now','localtime')),
+    PRIMARY KEY (session_id, seq)
+);
+
 CREATE TABLE IF NOT EXISTS practice_records (
     id             INTEGER PRIMARY KEY AUTOINCREMENT,
     session_id     INTEGER NOT NULL REFERENCES practice_sessions(id) ON DELETE CASCADE,
@@ -140,6 +151,7 @@ SCHEMA += "\n".join(registration.TABLE_DDL)
 DROP = """
 DROP TABLE IF EXISTS invite_uses;
 DROP TABLE IF EXISTS invite_codes;
+DROP TABLE IF EXISTS practice_answers;
 DROP TABLE IF EXISTS practice_records;
 DROP TABLE IF EXISTS practice_sessions;
 DROP TABLE IF EXISTS sentence_items;

@@ -204,38 +204,61 @@
     grade(question, timedOut ? null : picked);
   }
 
-  function grade(question, index) {
-    const correct = index !== null && index === question.answer;
-    if (correct) stats.right++; else stats.wrong++;
-
-    document.querySelectorAll(".option-chip").forEach(chip => {
-      const chipIndex = Number(chip.dataset.index);
-      if (chipIndex === question.answer) chip.classList.add("is-answer");
-      if (chipIndex === index) chip.classList.add("picked");
-    });
+  /** 判一题。服务器模式下题目里没有答案，要先把选项交给后端换回对错（PracticeStore 决定走哪边），
+   *  所以这里是异步的；调用方不 await，判完由这里自己排下一题。 */
+  async function grade(question, index) {
+    setReplayEnabled(false);
     lockOptions();
+    $("hint").textContent = "判分中…";
 
-    const played = question.options[question.answer - 1];
-    // 整句要等答完才给：作答时看到句子就等于白送答案
-    const sentence = played.sentence
-      ? `<div class="small text-muted mt-1">原句：${esc(played.sentence)}</div>` : "";
+    let verdict = null;
+    try {
+      verdict = await PracticeStore.checkVowelAnswer(sessionId, question, index);
+    } catch (err) {
+      verdict = null;      // 弱网下判分请求没回来：不卡住整场，这题的对错留给结果页
+    }
 
-    if (index === null) {
-      $("feedback").innerHTML =
-        `<div class="result-wrong"><i class="bi bi-hourglass-split me-2"></i>无回答` +
-        ` —— 正确的是 <b>${question.answer}</b>（${esc(played.word)}）</div>` + sentence;
-    } else if (correct) {
-      $("feedback").innerHTML =
-        `<div class="result-correct"><i class="bi bi-check-circle-fill me-2"></i>答对了` +
-        ` —— 播放的是 <b>${esc(played.word)}</b></div>` + sentence;
+    let correct = false;
+    if (verdict) {
+      question.answer = verdict.answer;
+      index = verdict.choice;          // 后端只认每题第一次提交，以它锁定的为准
+      correct = verdict.correct;
+      if (correct) stats.right++; else stats.wrong++;
+
+      document.querySelectorAll(".option-chip").forEach(chip => {
+        const chipIndex = Number(chip.dataset.index);
+        if (chipIndex === question.answer) chip.classList.add("is-answer");
+        if (chipIndex === index) chip.classList.add("picked");
+      });
+
+      const played = question.options[question.answer - 1];
+      // 整句要等答完才给：作答时看到句子就等于白送答案
+      const sentence = played.sentence
+        ? `<div class="small text-muted mt-1">原句：${esc(played.sentence)}</div>` : "";
+
+      if (index === null) {
+        $("feedback").innerHTML =
+          `<div class="result-wrong"><i class="bi bi-hourglass-split me-2"></i>无回答` +
+          ` —— 正确的是 <b>${question.answer}</b>（${esc(played.word)}）</div>` + sentence;
+      } else if (correct) {
+        $("feedback").innerHTML =
+          `<div class="result-correct"><i class="bi bi-check-circle-fill me-2"></i>答对了` +
+          ` —— 播放的是 <b>${esc(played.word)}</b></div>` + sentence;
+      } else {
+        $("feedback").innerHTML =
+          `<div class="result-wrong"><i class="bi bi-x-circle-fill me-2"></i>答错了` +
+          ` —— 你选了 ${index}，播放的是 <b>${esc(played.word)}</b></div>` + sentence;
+      }
     } else {
+      document.querySelectorAll(".option-chip").forEach(chip => {
+        if (Number(chip.dataset.index) === index) chip.classList.add("picked");
+      });
       $("feedback").innerHTML =
-        `<div class="result-wrong"><i class="bi bi-x-circle-fill me-2"></i>答错了` +
-        ` —— 你选了 ${index}，播放的是 <b>${esc(played.word)}</b></div>` + sentence;
+        `<div class="text-muted"><i class="bi bi-wifi-off me-2"></i>网络不稳，这题暂时判不了分` +
+        "，已记下你的选择，交卷后在结果页看对错</div>";
     }
 
     $("hint").textContent = "即将进入下一题…";
-    setReplayEnabled(false);
 
     records.push({
       seq: question.seq,
@@ -254,7 +277,7 @@
     });
 
     cursor++;
-    setTimeout(nextQuestion, 700);
+    setTimeout(nextQuestion, verdict ? 700 : 1500);
   }
 
   async function finish() {

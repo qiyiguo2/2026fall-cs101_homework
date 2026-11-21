@@ -84,7 +84,23 @@ const PracticeStore = (() => {
     }
   }
 
-  return { createSession, saveRecording, finish, get local() { return AppMode.local; } };
+  /** 近似音判一题，返回 {correct, answer, choice}（choice 是最终算数的那个选项）。
+   *  服务器模式下出题时不下发答案，要把选项交给后端换回对错；后端只认每题第一次提交。
+   *  本地模式题目里本来就带着答案（成绩只存这台设备，没有防作弊的必要），就地比对。
+   *  请求失败时抛错，调用方照常进入下一题，这一题的对错以结果页为准。 */
+  async function checkVowelAnswer(sessionId, question, choice) {
+    if (useLocal() || question.answer !== undefined) {
+      return { correct: choice !== null && choice === question.answer, answer: question.answer, choice };
+    }
+    const res = await Common.api("/api/vowel/answer",
+      { session_id: sessionId, seq: question.seq, choice }, { timeoutMs: 4000 });
+    return { correct: !!res.correct, answer: res.answer, choice: res.choice };
+  }
+
+  return {
+    createSession, saveRecording, finish, checkVowelAnswer,
+    get local() { return AppMode.local; }
+  };
 })();
 
 /** 本地模式的「设置」：值存在这台设备的 localStorage（见 local-store.js）。

@@ -15,12 +15,25 @@ const Common = (() => {
     return sharedAudio;
   }
 
-  async function api(url, data) {
-    const res = await fetch(url, {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify(data || {})
-    });
+  /** POST JSON。options.timeoutMs 给了就到点中止请求：练习进行中的请求（逐题判分）
+   *  不能在弱网下无限挂着，否则整场练习停在那一题上。 */
+  async function api(url, data, options = {}) {
+    const controller = options.timeoutMs && window.AbortController ? new AbortController() : null;
+    const timer = controller ? setTimeout(() => controller.abort(), options.timeoutMs) : null;
+    let res;
+    try {
+      res = await fetch(url, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(data || {}),
+        signal: controller ? controller.signal : undefined
+      });
+    } catch (err) {
+      if (err.name === "AbortError") throw new Error("请求超时");
+      throw err;
+    } finally {
+      if (timer) clearTimeout(timer);
+    }
     let json = {};
     try { json = await res.json(); } catch (e) { /* 非 JSON 响应 */ }
     if (!res.ok) {

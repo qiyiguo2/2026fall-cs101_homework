@@ -63,10 +63,21 @@ class GradingTestCase(FreshDbTestCase):
         return res.get_json()["session_id"]
 
     def vowel_questions(self, sid, count=4, client=None):
+        """出题，并从库里的快照把标准答案补回题目上（接口本身不下发答案）。"""
         res = (client or self.alice).post("/api/vowel/questions", json={
             "group_key": "sheep-ship", "count": count, "session_id": sid})
         self.assertEqual(res.status_code, 200, res.get_json())
-        return res.get_json()["questions"]
+        questions = res.get_json()["questions"]
+        answers = {q["seq"]: q["answer"] for q in json.loads(self.query(
+            "SELECT questions_json FROM practice_sessions WHERE id = ?", sid)[0][0])}
+        for q in questions:
+            self.assertNotIn("answer", q, "作答前不能下发答案")
+            q["answer"] = answers[q["seq"]]
+        return questions
+
+    def check(self, sid, seq, choice, client=None):
+        return (client or self.alice).post("/api/vowel/answer",
+                                           json={"session_id": sid, "seq": seq, "choice": choice})
 
     def words(self, sid, count=3, client=None):
         res = (client or self.alice).post("/api/words", json={"count": count, "session_id": sid})
@@ -168,9 +179,9 @@ class TestIssuingAndRefusals(GradingTestCase):
 
     def test_finish_without_issued_questions_is_refused(self):
         """旧版脚本出题时不带 session_id：交卷回 409 要求刷新，会话也不被标成已交卷。"""
-        sid = self.new_session("vowel")
-        self.alice.post("/api/vowel/questions", json={"group_key": "sheep-ship", "count": 2})
-        res = self.finish(sid, [{"seq": 1, "user_answer": 1, "is_correct": True}])
+        sid = self.new_session("read-translate")
+        self.alice.post("/api/words", json={"count": 2})
+        res = self.finish(sid, [{"seq": 1, "user_answer": "放弃", "is_correct": True}])
         self.assertEqual(res.status_code, 409)
         self.assertIn("刷新", res.get_json()["error"])
         self.assertNotIn("result_url", res.get_json(), "不能被前端当成「已交过卷」直接跳结果页")
@@ -215,6 +226,104 @@ class TestIssuingAndRefusals(GradingTestCase):
         self.finish(sid, [{"seq": 1, "user_answer": questions[0]["answer"]}])
         res = self.alice.post("/api/words", json={"count": 1, "session_id": sid})
         self.assertIn(res.status_code, (400, 409))
+
+
+class TestVowelAnswerHidden(GradingTestCase):
+    """服务器模式下近似音作答前拿不到答案：出题不带答案，音频地址不带单词，逐题判分锁定作答。"""
+
+    def setUp(self):
+        super().setUp()
+        self.static_dir = os.path.join(self.tmp, "static")
+        os.makedirs(os.path.join(self.static_dir, "audio"))
+        for word in ("sheep", "ship"):
+            for voice in ("f", "m"):
+                with open(os.path.join(self.static_dir, "audio", f"{word}.{voice}.wav"), "wb") as fh:
+                    fh.write(f"RIFF-{word}-{voice}".encode())
+        # static_folder 是 Flask 的属性（没有 deleter），mock.patch 还原不了，手动换回
+        saved = self.app.static_folder
+        self.app.static_folder = self.static_dir
+        self.addCleanup(setattr, self.app, "static_folder", saved)
+
+    def test_questions_carry_no_answer_and_no_word_in_audio_url(self):
+        sid = self.new_session("vowel")
+        res = self.alice.post("/api/vowel/questions", json={
+            "group_key": "sheep-ship", "count": 3, "session_id": sid}).get_json()
+        for q in res["questions"]:
+            self.assertNotIn("answer", q)
+            self.assertEqual(q["audio_url"], f"/api/practice/audio/{sid}/{q['seq']}")
+            self.assertNotIn("sheep", q["audio_url"])
+            self.assertNotIn("ship", q["audio_url"])
+
+    def test_server_mode_requires_a_session(self):
+        res = self.alice.post("/api/vowel/questions", json={"group_key": "sheep-ship", "count": 2})
+        self.assertEqual(res.status_code, 400)
+        self.assertIn("刷新", res.get_json()["error"])
+
+    def test_audio_is_served_by_seq_to_the_owner_only(self):
+        sid = self.new_session("vowel")
+        q = self.vowel_questions(sid, count=1)[0]
+        stored = json.loads(self.query(
+            "SELECT questions_json FROM practice_sessions WHERE id = ?", sid)[0][0])[0]
+        res = self.alice.get(q["audio_url"])
+        self.assertEqual(res.status_code, 200)
+        expected = stored["audio_url"].rsplit("/", 1)[-1]          # 如 sheep.f.wav
+        word, voice, _ = expected.split(".")
+        self.assertEqual(res.get_data(), f"RIFF-{word}-{voice}".encode())
+        self.assertIn("private", res.headers["Cache-Control"])
+        res.close()
+        bob = self.signed_in_client("bob")
+        self.assertEqual(bob.get(q["audio_url"]).status_code, 404)
+        self.assertEqual(self.alice.get(f"/api/practice/audio/{sid}/99").status_code, 404)
+
+    def test_check_returns_verdict_and_answer(self):
+        sid = self.new_session("vowel")
+        q = self.vowel_questions(sid, count=1)[0]
+        res = self.check(sid, 1, q["answer"]).get_json()
+        self.assertEqual(res, {"seq": 1, "choice": q["answer"], "correct": True, "answer": q["answer"]})
+
+    def test_first_choice_is_locked(self):
+        """先交错的选项换出答案，再交对的那个：这一题仍然按第一次判，交卷时也改不了。"""
+        sid = self.new_session("vowel")
+        q = self.vowel_questions(sid, count=1)[0]
+        wrong = 3 - q["answer"]
+        self.assertFalse(self.check(sid, 1, wrong).get_json()["correct"])
+        again = self.check(sid, 1, q["answer"]).get_json()
+        self.assertEqual((again["choice"], again["correct"]), (wrong, False))
+        res = self.finish(sid, [{"seq": 1, "user_answer": q["answer"], "is_correct": True}])
+        self.assertEqual(res.get_json()["correct"], 0)
+        self.assertEqual(self.query("SELECT user_answer FROM practice_records WHERE session_id = ?",
+                                    sid), [(str(wrong),)])
+
+    def test_timeout_is_locked_too(self):
+        sid = self.new_session("vowel")
+        q = self.vowel_questions(sid, count=1)[0]
+        self.assertEqual(self.check(sid, 1, None).get_json()["choice"], None)
+        self.assertEqual(self.finish(sid, [{"seq": 1, "user_answer": q["answer"]}])
+                         .get_json()["correct"], 0)
+
+    def test_unchecked_question_takes_the_submitted_choice(self):
+        """判分请求没发出去的题，服务器从没给过答案，交卷时照收前端的选项。"""
+        sid = self.new_session("vowel")
+        questions = self.vowel_questions(sid, count=2)
+        self.check(sid, 1, questions[0]["answer"])
+        res = self.finish(sid, [{"seq": 1, "user_answer": questions[0]["answer"]},
+                                {"seq": 2, "user_answer": questions[1]["answer"]}])
+        self.assertEqual(res.get_json()["correct"], 2)
+
+    def test_check_refusals(self):
+        sid = self.new_session("vowel")
+        self.vowel_questions(sid, count=1)
+        self.assertEqual(self.check(sid, 5, 1).status_code, 404)
+        self.assertEqual(self.check(sid, "x", 1).status_code, 400)
+        bob = self.signed_in_client("bob")
+        self.assertEqual(self.check(sid, 1, 1, client=bob).status_code, 404)
+        word_sid = self.new_session("read-translate")
+        self.words(word_sid)
+        self.assertEqual(self.check(word_sid, 1, 1).status_code, 400)
+        self.finish(sid, [])
+        self.assertEqual(self.check(sid, 1, 1).status_code, 409)
+        self.assertEqual(self.query("SELECT COUNT(*) FROM practice_answers WHERE session_id = ?",
+                                    sid), [(0,)], "被拒的判分请求不能锁定作答")
 
 
 class TestMigration(unittest.TestCase):

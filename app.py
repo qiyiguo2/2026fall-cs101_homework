@@ -681,6 +681,9 @@ def api_vowel_questions():
     builder = VOWEL_BUILDERS.get(mode)
     if builder is None:
         return jsonify({"error": "未知的练习类型，请选单词练习或句子练习"}), 400
+    if not is_local() and data.get("session_id") is None:
+        # 服务器模式下这里从不下发答案，题目必须挂在一场会话上，作答时才能换回对错
+        return jsonify({"error": "缺少 session_id：页面脚本可能是旧版本，请刷新页面后重新开始"}), 400
     try:
         requested = as_count(data.get("count", MISSING), 10)
         questions = builder(
@@ -699,6 +702,13 @@ def api_vowel_questions():
         data, ("vowel",), [grading.snapshot_vowel(q, mode) for q in questions])
     if refused:
         return refused
+    if not is_local():
+        # 答案留在服务器的快照里：学生作答后经 /api/vowel/answer 才换回对错。
+        # 音频也换成按题号取的地址，原来的文件名（如 n.3-sheep.f.wav）里就写着单词。
+        sid = int(data["session_id"])
+        for q in questions:
+            q.pop("answer", None)
+            q["audio_url"] = url_for("practice_audio", session_id=sid, seq=q["seq"])
     return jsonify({
         "questions": questions,
         "mode": mode,
@@ -832,6 +842,79 @@ def register_questions(data, allowed_types, snapshots):
     return None
 
 
+def _issued_question(session_id, seq):
+    """当前用户名下某场练习登记过的第 seq 题，连同会话行一起返回；找不到返回 (None, None)。"""
+    row = _owned_open_session(session_id)
+    if not row or row["questions_json"] is None:
+        return row, None
+    for q in json.loads(row["questions_json"]):
+        if q.get("seq") == seq:
+            return row, q
+    return row, None
+
+
+@app.get("/api/practice/audio/<int:session_id>/<int:seq>")
+@api_login_required
+def practice_audio(session_id, seq):
+    """按题号播近似音的音频，地址里不带文件名，作答前看网络面板也看不出播的是哪个词。"""
+    if is_local():
+        abort(404)
+    _, question = _issued_question(session_id, seq)
+    url = (question or {}).get("audio_url") or ""
+    prefix = (app.static_url_path or "/static").rstrip("/") + "/"
+    if not url.startswith(prefix):
+        abort(404)
+    response = send_from_directory(app.static_folder, url[len(prefix):])
+    # 只给本人缓存：同一题的「重播」不用再下载，但共享缓存不能把它当公共资源存
+    response.headers["Cache-Control"] = "private, max-age=3600"
+    return response
+
+
+@app.post("/api/vowel/answer")
+@api_login_required
+def api_vowel_answer():
+    """近似音逐题判分：交上一题的选项，换回对错和标准答案。
+
+    一题只认第一次提交（practice_answers 的主键挡住第二次）：答案一旦换出去，
+    再交别的选项也改不了这一题，交卷时用的也是这里锁定的那个。
+    """
+    if is_local():
+        return local_mode_refuse("vowel_answer")
+    data = json_body()
+    try:
+        seq = int(data.get("seq"))
+    except (TypeError, ValueError):
+        return jsonify({"error": "题号不是数字"}), 400
+    row, question = _issued_question(data.get("session_id"), seq)
+    if not row:
+        return jsonify({"error": "练习会话不存在"}), 404
+    if row["practice_type"] != "vowel":
+        return jsonify({"error": "这场练习不是近似音"}), 400
+    if row["finished"]:
+        return already_finished(row["id"])
+    if not question:
+        return jsonify({"error": f"这场练习里没有第 {seq} 题"}), 404
+
+    choice = grading.vowel_choice(data.get("choice"))
+    db = get_db()
+    db.execute(
+        "INSERT OR IGNORE INTO practice_answers(session_id, seq, user_answer) VALUES(?,?,?)",
+        (row["id"], seq, None if choice is None else str(choice)),
+    )
+    db.commit()
+    locked = db.execute(
+        "SELECT user_answer FROM practice_answers WHERE session_id = ? AND seq = ?",
+        (row["id"], seq),
+    ).fetchone()["user_answer"]
+    locked_choice = grading.vowel_choice(locked)
+    return jsonify({
+        "seq": seq,
+        "choice": locked_choice,
+        "correct": grading.judge(question, locked_choice),
+        "answer": question["answer"],
+    })
+
+
 @app.post("/api/practice/finish")
 @api_login_required
 def api_finish_session():
@@ -888,10 +971,17 @@ def api_finish_session():
             return jsonify({"error": f"第 {index} 条记录的 user_answer 必须是文本或数字"}), 400
         answers[seq] = (answer, own_recording_path(rec.get("recording_path"), uid))
 
+    # 近似音逐题判分时锁定过的作答以服务器为准；没锁定过的题，服务器从没把答案给出去，
+    # 前端交上来的选项照收（比如逐题判分的请求在弱网下没发出去）。
+    locked = {r["seq"]: r["user_answer"] for r in db.execute(
+        "SELECT seq, user_answer FROM practice_answers WHERE session_id = ?", (session_id,))}
+
     parsed = []
     for seq in sorted(issued):
         question = issued[seq]
         answer, recording = answers.get(seq, (None, None))
+        if seq in locked:
+            answer = locked[seq]
         payload = {k: v for k, v in question.items() if k != "seq"}
         parsed.append((
             seq,

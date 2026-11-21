@@ -67,6 +67,9 @@ python -m unittest tests.test_app_modes.TestLocalMode.test_pages_open_without_an
 对错由 `services/grading.py` 重算，没交的题算错，没登记过题的会话拒绝交卷（409）。
 前端那份判分只管即时反馈和本地模式的成绩，看读译的中文规则在 `tworounds.js` 的 `judgeChinese`
 与 `grading.judge_chinese` 里各有一份，**必须一起改**，`tests/test_server_grading.py` 会用 node 对照两边。
+近似音在服务器模式下作答前拿不到答案：出题接口必须带 `session_id`，回包里没有 `answer`，
+音频地址换成 `/api/practice/audio/<会话>/<题号>`；每题作答时 `PracticeStore.checkVowelAnswer` 调
+`/api/vowel/answer` 换回对错，后端在 `practice_answers` 里锁定第一次提交，交卷时以它为准。
 看读译 / 听读写的三个时长（第一轮、第二轮、题间停顿）边界在 `config.py` 的 `ROUND1_SECONDS` 等常量里，
 用户默认值存在 `users` 表对应列，`local` 模式存在 localStorage 的 `ep_settings`。
 

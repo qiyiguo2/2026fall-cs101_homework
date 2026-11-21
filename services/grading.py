@@ -9,6 +9,9 @@ is_correct: true 就是 100 分；只交自己答对的那几题，正确率也�
 2. 交卷时前端只有「第几题、答了什么」被采信：题目内容和标准答案取快照，
    对错由 judge() 重算，没交上来的题按无回答算错，总题数等于发出去的题数。
 
+近似音另有一步：服务器模式下出题回包不带答案，学生每答一题由 /api/vowel/answer
+在 practice_answers 里锁定作答、换回对错和答案（见 app.py），交卷时以锁定的为准。
+
 前端（vowel.js、tworounds.js）仍然各自判一遍，只用于作答当下的即时反馈和计分板；
 本地模式（APP_MODE=local）成绩只存学生自己的浏览器，也仍然由前端判。
 所以看读译的中文判分规则在 tworounds.js 的 judgeChinese 里还有一份，**两边必须一起改**，
@@ -76,7 +79,7 @@ def _text_answer(answer):
     return "" if text == EMPTY_ANSWER else text
 
 
-def _vowel_choice(answer):
+def vowel_choice(answer):
     """近似音的作答是选项编号 1/2；超时是 null。其他写法一律当没答。"""
     if answer is None or isinstance(answer, bool):
         return None
@@ -90,7 +93,7 @@ def judge(question, answer):
     """按发出去的那道题（快照）判一条作答，返回 True / False。"""
     qtype = question.get("type")
     if qtype == "vowel":
-        choice = _vowel_choice(answer)
+        choice = vowel_choice(answer)
         return choice is not None and choice == question.get("answer")
     text = _text_answer(answer)
     if not text:

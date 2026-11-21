@@ -58,6 +58,21 @@ def table_count(path, table):
         conn.close()
 
 
+def issued_answers(path, session_id):
+    """读出某场练习登记在服务器上的标准答案 {题号: 答案}。
+
+    服务器模式的近似音出题接口不再下发答案，测试要知道「选哪个算对」只能看库里的快照。
+    """
+    import json
+    conn = sqlite3.connect(path)
+    try:
+        raw = conn.execute("SELECT questions_json FROM practice_sessions WHERE id = ?",
+                           (session_id,)).fetchone()[0]
+    finally:
+        conn.close()
+    return {q["seq"]: q.get("answer") for q in json.loads(raw)}
+
+
 class ModeTestBase(unittest.TestCase):
     """把 db.DB_PATH 指到副本上，测试怎么写都不会碰开发库。"""
 
@@ -177,6 +192,9 @@ class TestServerMode(ModeTestBase):
             "group_key": group, "count": 2, "session_id": session_id})
         self.assertEqual(issued.status_code, 200, issued.get_json())
         first, second = issued.get_json()["questions"]
+        self.assertNotIn("answer", first, "服务器模式下作答前不能下发答案")
+        answers = issued_answers(self.db_path, session_id)
+        first["answer"], second["answer"] = answers[1], answers[2]
 
         # 第一题选对、第二题选错；成绩以后端按出题快照判的为准
         records = [
@@ -231,6 +249,8 @@ class TestLocalMode(ModeTestBase):
         data = response.get_json()
         self.assertEqual(len(data["questions"]), 3)
         self.assertTrue(data["questions"][0]["audio_url"].startswith("/static/"))
+        # 本地模式成绩只存在学生自己的浏览器，前端就地判分，答案照常下发
+        self.assertIn(data["questions"][0]["answer"], (1, 2))
 
         # 本地模式的 session_id 是浏览器 IndexedDB 的键，后端忽略它，不登记也不报错
         with_sid = self.client.post("/api/vowel/questions",
